@@ -32,8 +32,8 @@ pour prioriser les menaces.
 ---
 
 ## Structure du projet
-Projet/
-    │
+
+    Projet/
     ├── rss.py                    # Pipeline principal (étapes 1 à 4)
     ├── alertes.py                # Générateur d'alertes email (étape 7)
     ├── Visualizations.ipynb      # Analyse, visualisations et ML (étapes 5 et 6)
