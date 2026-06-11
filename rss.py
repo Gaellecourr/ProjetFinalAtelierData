@@ -1,10 +1,3 @@
-"""
-Projet Mastercamp 2026 - EFREI
-Analyse des Avis et Alertes ANSSI avec Enrichissement des CVE
-Étapes 1, 2 et 3 : Extraction RSS → Identification CVE → Enrichissement
-Version parallélisée : ThreadPoolExecutor + EPSS batch + session HTTP persistante
-"""
-
 import feedparser
 import requests
 import re
@@ -16,6 +9,7 @@ import pandas as pd
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+#coucou
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
