@@ -1,0 +1,15 @@
+# Données générées localement — trop volumineuses pour Git
+anssi_cve_enrichi.csv
+data/
+
+# Fichiers Python temporaires
+__pycache__/
+*.pyc
+*.pyo
+
+# Environnements virtuels
+.venv/
+env/
+
+# Fichiers VS Code
+.vscode/

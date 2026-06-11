@@ -22,11 +22,11 @@ API_EPSS_BATCH = "https://api.first.org/data/v1/epss?cve={cves}"   # jusqu'à ~1
 
 OUTPUT_CSV = "anssi_cve_enrichi.csv"
 
-# Dossiers de données locales pré-téléchargées (si disponibles)
-LOCAL_AVIS_DIR   = "avis/"
-LOCAL_ALERTE_DIR = "alertes/"
-LOCAL_MITRE_DIR  = "mitre/"
-LOCAL_FIRST_DIR  = "first/"
+# Dossiers de données locales pré-téléchargées
+LOCAL_AVIS_DIR   = "data/Avis/"      
+LOCAL_ALERTE_DIR = "data/alertes/"
+LOCAL_MITRE_DIR  = "data/mitre/"
+LOCAL_FIRST_DIR  = "data/first/"
 
 # ── Paramètres de parallélisme ────────────────────────────────────────────────
 MAX_WORKERS_BULLETINS = 10   # requêtes JSON bulletins ANSSI en parallèle
@@ -138,6 +138,63 @@ def extraire_tous_bulletins():
         alertes = fut_alertes.result()
     return avis + alertes
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CHARGEMENT DES BULLETINS LOCAUX (dossiers data/)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def charger_bulletins_locaux():
+    """
+    Lit tous les fichiers JSON des dossiers locaux data/Avis/ et data/alertes/.
+    Retourne une liste de bulletins au même format que extraire_flux_rss().
+    C'est le même format de dict, donc les deux sources sont fusionnables.
+    """
+    bulletins = []
+
+    sources = [
+        (LOCAL_AVIS_DIR,   "Avis"),
+        (LOCAL_ALERTE_DIR, "Alerte"),
+    ]
+
+    for dossier, type_bulletin in sources:
+        if not os.path.isdir(dossier):
+            print(f"  [!] Dossier introuvable : {dossier}")
+            continue
+
+        fichiers = os.listdir(dossier)
+        print(f"  [+] {len(fichiers)} fichiers locaux trouvés dans {dossier}")
+
+        for nom_fichier in fichiers:
+            chemin = os.path.join(dossier, nom_fichier)
+            data   = load_local_json(chemin)
+            if data is None:
+                continue
+
+            anssi_id = data.get("reference", nom_fichier)
+
+            # Date : première révision = date de publication initiale
+            revisions = data.get("revisions", [])
+            date_pub  = None
+            if revisions:
+                raw = revisions[0].get("revision_date", "")
+                try:
+                    date_pub = datetime.fromisoformat(raw[:10]).strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    date_pub = raw[:10] if raw else None
+
+            # Lien construit depuis la référence
+            sous_chemin = "alerte" if type_bulletin == "Alerte" else "avis"
+            lien = f"https://www.cert.ssi.gouv.fr/{sous_chemin}/{anssi_id}/"
+
+            bulletins.append({
+                "id_anssi": anssi_id,
+                "titre":    f"Bulletin {anssi_id}",  # le JSON local n'a pas de titre court
+                "type":     type_bulletin,
+                "date":     date_pub,
+                "lien":     lien,
+            })
+
+    print(f"  [+] Total bulletins locaux chargés : {len(bulletins)}")
+    return bulletins
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ÉTAPE 2 : EXTRACTION DES CVE PAR BULLETIN  (parallélisée)
@@ -392,45 +449,64 @@ def construire_dataframe(bulletins, cves_par_bulletin, mitre_data, epss_data):
 def main():
     t0 = time.time()
     print("=" * 60)
-    print("  ANSSI CVE Pipeline – Étapes 1, 2 & 3  (parallélisé)")
+    print("  ANSSI CVE Pipeline – Fusion API + Données locales")
     print("=" * 60)
 
-    # ── Étape 1 : flux RSS (les 2 flux en parallèle) ─────────────
-    bulletins = extraire_tous_bulletins()
-    print(f"\n[+] Total bulletins : {len(bulletins)}")
+    # ── Étape 1a : flux RSS en ligne (bulletins récents) ─────────
+    print("\n[*] Source 1 : flux RSS en ligne...")
+    bulletins_api = extraire_tous_bulletins()
 
-    # ── Étape 2 : extraction CVE (bulletins en parallèle) ────────
-    cves_par_bulletin = extraire_cve_tous_bulletins(bulletins)
+    # ── Étape 1b : fichiers locaux (historique complet) ──────────
+    print("\n[*] Source 2 : fichiers locaux data/...")
+    bulletins_locaux = charger_bulletins_locaux()
+
+    # ── Fusion + déduplication ────────────────────────────────────
+    # On fusionne les deux listes et on supprime les doublons par id_anssi.
+    # Les bulletins API sont mis en premier : en cas de doublon,
+    # on conserve la version API (plus récente / plus complète).
+    tous_bulletins = bulletins_api + bulletins_locaux
+    vus = set()
+    bulletins_uniques = []
+    for b in tous_bulletins:
+        if b["id_anssi"] not in vus:
+            vus.add(b["id_anssi"])
+            bulletins_uniques.append(b)
+
+    print(f"\n[+] Bulletins API     : {len(bulletins_api)}")
+    print(f"[+] Bulletins locaux  : {len(bulletins_locaux)}")
+    print(f"[+] Après dédup       : {len(bulletins_uniques)} bulletins uniques")
+
+    # ── Étape 2 : extraction CVE ──────────────────────────────────
+    cves_par_bulletin = extraire_cve_tous_bulletins(bulletins_uniques)
     toutes_cves = sorted({
         cve
         for cves in cves_par_bulletin.values()
         for cve in cves
     })
-    print(f"\n[+] CVE uniques : {len(toutes_cves)}")
+    print(f"\n[+] CVE uniques totaux : {len(toutes_cves)}")
 
-    # ── Étape 3a : MITRE (CVE en parallèle) ──────────────────────
+    # ── Étape 3a : MITRE ──────────────────────────────────────────
     mitre_data = enrichir_mitre_tous(toutes_cves)
 
-    # ── Étape 3b : EPSS (batch, une ou quelques requêtes) ────────
-    print(f"\n[*] Enrichissement EPSS batch ({len(toutes_cves)} CVE)…")
+    # ── Étape 3b : EPSS batch ─────────────────────────────────────
+    print(f"\n[*] Enrichissement EPSS batch ({len(toutes_cves)} CVE)...")
     epss_data = enrichir_epss_batch(toutes_cves)
     print(f"  [+] {len(epss_data)} scores EPSS récupérés.")
 
     # ── Consolidation ─────────────────────────────────────────────
-    df = construire_dataframe(bulletins, cves_par_bulletin, mitre_data, epss_data)
+    df = construire_dataframe(bulletins_uniques, cves_par_bulletin, mitre_data, epss_data)
 
-    # ── Aperçu ───────────────────────────────────────────────────
+    # ── Aperçu ────────────────────────────────────────────────────
     elapsed = time.time() - t0
     print("\n" + "=" * 60)
     print(f"  DataFrame consolidé  ({elapsed:.1f}s)")
     print("=" * 60)
-    print(df.head(10).to_string(index=False))
     print(f"\nDimensions    : {df.shape[0]} lignes × {df.shape[1]} colonnes")
     print(f"Durée totale  : {elapsed:.1f}s")
     print("\nSévérités :")
     print(df["base_severity"].value_counts())
 
-    # ── Export CSV ───────────────────────────────────────────────
+    # ── Export CSV ────────────────────────────────────────────────
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     print(f"\n[+] CSV exporté → {OUTPUT_CSV}")
 
